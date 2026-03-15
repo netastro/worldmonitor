@@ -7,6 +7,7 @@ import type {
 } from '../../../../src/generated/server/worldmonitor/economic/v1/service_server';
 
 import { getCachedJsonBatch, cachedFetchJson } from '../../../_shared/redis';
+import { toUniqueSortedLimited } from '../../../_shared/normalize-list';
 
 const FRED_API_BASE = 'https://api.stlouisfed.org/fred';
 const REDIS_CACHE_KEY = 'economic:fred:v1';
@@ -44,7 +45,7 @@ async function fetchSingleFred(seriesId: string, limit: number): Promise<FredSer
 
     const obsData = await obsResponse.json() as { observations?: Array<{ date: string; value: string }> };
     const observations: FredObservation[] = (obsData.observations || [])
-      .map((obs) => { const v = parseFloat(obs.value); return isNaN(v) || obs.value === '.' ? null : { date: obs.date, value: v }; })
+      .map((obs) => { const v = parseFloat(obs.value); return Number.isNaN(v) || obs.value === '.' ? null : { date: obs.date, value: v }; })
       .filter((o): o is FredObservation => o !== null)
       .reverse();
 
@@ -73,8 +74,7 @@ export async function getFredSeriesBatch(
     const normalized = req.seriesIds
       .map((id) => id.trim().toUpperCase())
       .filter((id) => ALLOWED_SERIES.has(id));
-    const uniqueSorted = Array.from(new Set(normalized)).sort();
-    const limitedList = uniqueSorted.slice(0, 10);
+    const limitedList = toUniqueSortedLimited(normalized, 10);
     const limit = req.limit > 0 ? Math.min(req.limit, 1000) : 120;
 
     const results: Record<string, FredSeries> = {};
