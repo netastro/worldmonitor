@@ -46,13 +46,14 @@ export const BOOTSTRAP_CACHE_KEYS: Record<string, string> = {
   correlationCards: 'correlation:cards-bootstrap:v1',
   securityAdvisories: 'intelligence:advisories-bootstrap:v1',
   forecasts:          'forecast:predictions:v2',
+  customsRevenue:     'trade:customs-revenue:v1',
 };
 
 export const BOOTSTRAP_TIERS: Record<string, 'slow' | 'fast'> = {
   bisPolicy: 'slow', bisExchange: 'slow', bisCredit: 'slow',
   minerals: 'slow', giving: 'slow', sectors: 'slow',
   progressData: 'slow', renewableEnergy: 'slow',
-  etfFlows: 'slow', shippingRates: 'slow', wildfires: 'slow',
+  etfFlows: 'slow', shippingRates: 'fast', wildfires: 'slow',
   climateAnomalies: 'slow', cyberThreats: 'slow', techReadiness: 'slow',
   theaterPosture: 'fast', naturalEvents: 'slow',
   cryptoQuotes: 'slow', gulfQuotes: 'slow', stablecoinMarkets: 'slow',
@@ -65,4 +66,5 @@ export const BOOTSTRAP_TIERS: Record<string, 'slow' | 'fast'> = {
   spending: 'fast', gdeltIntel: 'fast', correlationCards: 'fast',
   securityAdvisories: 'slow',
   forecasts: 'fast',
+  customsRevenue: 'slow',
 };

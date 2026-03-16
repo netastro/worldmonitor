@@ -103,6 +103,7 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
   '/api/trade/v1/get-trade-flows': 'static',
   '/api/trade/v1/get-trade-barriers': 'static',
   '/api/trade/v1/get-trade-restrictions': 'static',
+  '/api/trade/v1/get-customs-revenue': 'static',
   '/api/economic/v1/list-world-bank-indicators': 'static',
   '/api/economic/v1/get-energy-capacity': 'static',
   '/api/supply-chain/v1/get-critical-minerals': 'daily',
@@ -257,8 +258,16 @@ export function createDomainGateway(
       }
     }
 
-    if (response.status === 200 && request.method === 'GET') {
-      if (mergedHeaders.get('X-No-Cache')) {
+    // For GET 200 responses: read body once for cache-header decisions + ETag
+    if (response.status === 200 && request.method === 'GET' && response.body) {
+      const bodyBytes = await response.arrayBuffer();
+
+      // Skip CDN caching for upstream-unavailable / empty responses so CF
+      // doesn't serve stale error data for hours.
+      const bodyStr = new TextDecoder().decode(bodyBytes);
+      const isUpstreamUnavailable = bodyStr.includes('"upstreamUnavailable":true');
+
+      if (mergedHeaders.get('X-No-Cache') || isUpstreamUnavailable) {
         mergedHeaders.set('Cache-Control', 'no-store');
         mergedHeaders.set('X-Cache-Tier', 'no-store');
       } else {
@@ -270,15 +279,11 @@ export function createDomainGateway(
         if (cdnCache) mergedHeaders.set('CDN-Cache-Control', cdnCache);
         mergedHeaders.set('X-Cache-Tier', tier);
       }
-    }
-    mergedHeaders.delete('X-No-Cache');
-    if (!new URL(request.url).searchParams.has('_debug')) {
-      mergedHeaders.delete('X-Cache-Tier');
-    }
+      mergedHeaders.delete('X-No-Cache');
+      if (!new URL(request.url).searchParams.has('_debug')) {
+        mergedHeaders.delete('X-Cache-Tier');
+      }
 
-    // ETag / 304 Not Modified — avoid resending unchanged data
-    if (response.status === 200 && request.method === 'GET' && response.body) {
-      const bodyBytes = await response.arrayBuffer();
       // FNV-1a inspired fast hash — good enough for cache validation
       let hash = 2166136261;
       const view = new Uint8Array(bodyBytes);
@@ -299,6 +304,13 @@ export function createDomainGateway(
         statusText: response.statusText,
         headers: mergedHeaders,
       });
+    }
+
+    if (response.status === 200 && request.method === 'GET') {
+      if (mergedHeaders.get('X-No-Cache')) {
+        mergedHeaders.set('Cache-Control', 'no-store');
+      }
+      mergedHeaders.delete('X-No-Cache');
     }
 
     return new Response(response.body, {

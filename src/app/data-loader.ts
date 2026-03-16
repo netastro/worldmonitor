@@ -56,6 +56,7 @@ import {
   fetchTariffTrends,
   fetchTradeFlows,
   fetchTradeBarriers,
+  fetchCustomsRevenue,
   fetchShippingRates,
   fetchChokepointStatus,
   fetchCriticalMinerals,
@@ -102,8 +103,6 @@ import { isDesktopRuntime, toApiUrl } from '@/services/runtime';
 import { getAiFlowSettings } from '@/services/ai-flow-settings';
 import { t, getCurrentLanguage } from '@/services/i18n';
 import { getHydratedData } from '@/services/bootstrap';
-import { canQueueAiClassification, AI_CLASSIFY_MAX_PER_FEED } from '@/services/ai-classify-queue';
-import { classifyWithAI } from '@/services/threat-classifier';
 import { ingestHeadlines } from '@/services/trending-keywords';
 import type { ListFeedDigestResponse } from '@/generated/client/worldmonitor/news/v1/service_client';
 import type { GetSectorSummaryResponse, ListMarketQuotesResponse } from '@/generated/client/worldmonitor/market/v1/service_client';
@@ -430,7 +429,7 @@ export class DataLoaderManager implements AppModule {
       });
     }
 
-    if (Object.prototype.hasOwnProperty.call(DEFAULT_PANELS, 'giving')) {
+    if (Object.prototype.hasOwnProperty.call(DEFAULT_PANELS, 'giving') && shouldLoad('giving')) {
       tasks.push({
         name: 'giving',
         task: runGuarded('giving', async () => {
@@ -455,10 +454,14 @@ export class DataLoaderManager implements AppModule {
           this.ctx.map?.setLayerReady('ciiChoropleth', true);
         }
       } catch { /* non-fatal */ }
-      tasks.push({ name: 'intelligence', task: runGuarded('intelligence', () => this.loadIntelligenceSignals()) });
+      if (shouldLoadAny(['cii', 'strategic-risk', 'strategic-posture'])) {
+        tasks.push({ name: 'intelligence', task: runGuarded('intelligence', () => this.loadIntelligenceSignals()) });
+      }
     }
 
-    if (SITE_VARIANT === 'full') tasks.push({ name: 'firms', task: runGuarded('firms', () => this.loadFirmsData()) });
+    if (SITE_VARIANT === 'full' && (shouldLoad('satellite-fires') || this.ctx.mapLayers.natural)) {
+      tasks.push({ name: 'firms', task: runGuarded('firms', () => this.loadFirmsData()) });
+    }
     if (this.ctx.mapLayers.natural) tasks.push({ name: 'natural', task: runGuarded('natural', () => this.loadNatural()) });
     if (SITE_VARIANT !== 'happy' && this.ctx.mapLayers.weather) tasks.push({ name: 'weather', task: runGuarded('weather', () => this.loadWeatherAlerts()) });
     if (SITE_VARIANT !== 'happy' && !isDesktopRuntime() && this.ctx.mapLayers.ais) tasks.push({ name: 'ais', task: runGuarded('ais', () => this.loadAisSignals()) });
@@ -466,7 +469,7 @@ export class DataLoaderManager implements AppModule {
     if (SITE_VARIANT !== 'happy' && this.ctx.mapLayers.cables) tasks.push({ name: 'cableHealth', task: runGuarded('cableHealth', () => this.loadCableHealth()) });
     if (SITE_VARIANT !== 'happy' && this.ctx.mapLayers.flights) tasks.push({ name: 'flights', task: runGuarded('flights', () => this.loadFlightDelays()) });
     if (SITE_VARIANT !== 'happy' && CYBER_LAYER_ENABLED && this.ctx.mapLayers.cyberThreats) tasks.push({ name: 'cyberThreats', task: runGuarded('cyberThreats', () => this.loadCyberThreats()) });
-    if (SITE_VARIANT !== 'happy' && !isDesktopRuntime()) tasks.push({ name: 'iranAttacks', task: runGuarded('iranAttacks', () => this.loadIranEvents()) });
+    if (SITE_VARIANT !== 'happy' && !isDesktopRuntime() && (this.ctx.mapLayers.iranAttacks || shouldLoadAny(['cii', 'strategic-risk', 'strategic-posture']))) tasks.push({ name: 'iranAttacks', task: runGuarded('iranAttacks', () => this.loadIranEvents()) });
     if (SITE_VARIANT !== 'happy' && (this.ctx.mapLayers.techEvents || SITE_VARIANT === 'tech')) tasks.push({ name: 'techEvents', task: runGuarded('techEvents', () => this.loadTechEvents()) });
     if (SITE_VARIANT !== 'happy' && this.ctx.mapLayers.satellites && this.ctx.map?.isGlobeMode?.()) tasks.push({ name: 'satellites', task: runGuarded('satellites', () => this.loadSatellites()) });
     if (SITE_VARIANT !== 'happy' && this.ctx.mapLayers.webcams) tasks.push({ name: 'webcams', task: runGuarded('webcams', () => this.loadWebcams()) });
@@ -769,19 +772,10 @@ export class DataLoaderManager implements AppModule {
 
         ingestHeadlines(items.map(i => ({ title: i.title, pubDate: i.pubDate, source: i.source, link: i.link })));
 
-        const aiCandidates = items
-          .filter(i => i.threat?.source === 'keyword')
-          .sort((a, b) => b.pubDate.getTime() - a.pubDate.getTime())
-          .slice(0, AI_CLASSIFY_MAX_PER_FEED);
-        for (const item of aiCandidates) {
-          if (!canQueueAiClassification(item.title)) continue;
-          classifyWithAI(item.title, SITE_VARIANT).then(ai => {
-            if (ai && item.threat && ai.confidence > item.threat.confidence) {
-              item.threat = ai;
-              item.isAlert = ai.level === 'critical' || ai.level === 'high';
-            }
-          }).catch(() => {});
-        }
+        // Skip client-side AI reclassification for digest items.
+        // The server already ran enrichWithAiCache() which checks the same Redis keys
+        // that classifyEvent writes to. Re-firing classifyEvent from every client wastes
+        // edge requests even when they're Redis cache hits.
 
         checkBatchForBreakingAlerts(items);
         this.flashMapForNews(items);
@@ -2301,27 +2295,38 @@ export class DataLoaderManager implements AppModule {
     if (!tradePanel) return;
 
     try {
-      const [restrictions, tariffs, flows, barriers] = await Promise.all([
+      const [restrictions, tariffs, flows, barriers, revenue] = await Promise.allSettled([
         fetchTradeRestrictions([], 50),
         fetchTariffTrends('840', '156', '', 10),
         fetchTradeFlows('840', '156', 10),
         fetchTradeBarriers([], '', 50),
+        fetchCustomsRevenue(),
       ]);
 
-      tradePanel.updateRestrictions(restrictions);
-      tradePanel.updateTariffs(tariffs);
-      tradePanel.updateFlows(flows);
-      tradePanel.updateBarriers(barriers);
+      const r = restrictions.status === 'fulfilled' ? restrictions.value : null;
+      const ta = tariffs.status === 'fulfilled' ? tariffs.value : null;
+      const fl = flows.status === 'fulfilled' ? flows.value : null;
+      const ba = barriers.status === 'fulfilled' ? barriers.value : null;
+      const rev = revenue.status === 'fulfilled' ? revenue.value : null;
 
-      const totalItems = restrictions.restrictions.length + tariffs.datapoints.length + flows.flows.length + barriers.barriers.length;
-      const anyUnavailable = restrictions.upstreamUnavailable || tariffs.upstreamUnavailable || flows.upstreamUnavailable || barriers.upstreamUnavailable;
+      if (r) tradePanel.updateRestrictions(r);
+      if (ta) tradePanel.updateTariffs(ta);
+      if (fl) tradePanel.updateFlows(fl);
+      if (ba) tradePanel.updateBarriers(ba);
+      if (rev) tradePanel.updateRevenue(rev);
 
-      this.ctx.statusPanel?.updateApi('WTO', { status: anyUnavailable ? 'warning' : totalItems > 0 ? 'ok' : 'error' });
+      const wtoItems = (r?.restrictions?.length ?? 0) + (ta?.datapoints?.length ?? 0) + (fl?.flows?.length ?? 0) + (ba?.barriers?.length ?? 0);
+      const anyUnavailable = r?.upstreamUnavailable || ta?.upstreamUnavailable || fl?.upstreamUnavailable || ba?.upstreamUnavailable;
 
-      if (totalItems > 0) {
-        dataFreshness.recordUpdate('wto_trade', totalItems);
+      this.ctx.statusPanel?.updateApi('WTO', { status: anyUnavailable ? 'warning' : wtoItems > 0 ? 'ok' : 'error' });
+
+      if (wtoItems > 0) {
+        dataFreshness.recordUpdate('wto_trade', wtoItems);
       } else if (anyUnavailable) {
         dataFreshness.recordError('wto_trade', 'WTO upstream temporarily unavailable');
+      }
+      if (rev?.months?.length) {
+        dataFreshness.recordUpdate('treasury_revenue', rev.months.length);
       }
     } catch (e) {
       console.error('[App] Trade policy failed:', e);

@@ -47,22 +47,24 @@ const BOOTSTRAP_CACHE_KEYS = {
   correlationCards:   'correlation:cards-bootstrap:v1',
   forecasts:         'forecast:predictions:v2',
   securityAdvisories: 'intelligence:advisories-bootstrap:v1',
+  customsRevenue:    'trade:customs-revenue:v1',
 };
 
 const SLOW_KEYS = new Set([
   'bisPolicy', 'bisExchange', 'bisCredit', 'minerals', 'giving',
-  'sectors', 'etfFlows', 'shippingRates', 'wildfires', 'climateAnomalies',
+  'sectors', 'etfFlows', 'wildfires', 'climateAnomalies',
   'cyberThreats', 'techReadiness', 'progressData', 'renewableEnergy',
   'naturalEvents',
   'cryptoQuotes', 'gulfQuotes', 'stablecoinMarkets', 'unrestEvents', 'ucdpEvents',
   'techEvents',
   'securityAdvisories',
+  'customsRevenue',
 ]);
 const FAST_KEYS = new Set([
   'earthquakes', 'outages', 'serviceStatuses', 'macroSignals', 'chokepoints', 'chokepointTransits',
   'marketQuotes', 'commodityQuotes', 'positiveGeoEvents', 'riskScores', 'flightDelays','insights', 'predictions',
   'iranEvents', 'temporalAnomalies', 'weatherAlerts', 'spending', 'theaterPosture', 'gdeltIntel',
-  'correlationCards', 'forecasts',
+  'correlationCards', 'forecasts', 'shippingRates',
 ]);
 
 const TIER_CACHE = {
