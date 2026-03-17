@@ -98,11 +98,36 @@ async function redisDel(url, token, key) {
   return redisCommand(url, token, ['DEL', key]);
 }
 
+// Upstash REST calls surface transient network issues through fetch/undici
+// errors rather than stable app-level error codes, so we normalize the common
+// timeout/reset/DNS variants here before deciding to skip a seed run.
+export function isTransientRedisError(err) {
+  const message = String(err?.message || '');
+  const causeMessage = String(err?.cause?.message || '');
+  const code = String(err?.code || err?.cause?.code || '');
+  const combined = `${message} ${causeMessage} ${code}`;
+  return /UND_ERR_|Connect Timeout Error|fetch failed|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(combined);
+}
+
 export async function acquireLock(domain, runId, ttlMs) {
   const { url, token } = getRedisCredentials();
   const lockKey = `seed-lock:${domain}`;
   const result = await redisCommand(url, token, ['SET', lockKey, runId, 'NX', 'PX', ttlMs]);
   return result?.result === 'OK';
+}
+
+export async function acquireLockSafely(domain, runId, ttlMs, opts = {}) {
+  const label = opts.label || domain;
+  try {
+    const locked = await withRetry(() => acquireLock(domain, runId, ttlMs), opts.maxRetries ?? 2, opts.delayMs ?? 1000);
+    return { locked, skipped: false, reason: null };
+  } catch (err) {
+    if (isTransientRedisError(err)) {
+      console.warn(`  SKIPPED: Redis unavailable during lock acquisition for ${label}`);
+      return { locked: false, skipped: true, reason: 'redis_unavailable' };
+    }
+    throw err;
+  }
 }
 
 export async function releaseLock(domain, runId) {
@@ -275,8 +300,13 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
   console.log(`  Key:     ${canonicalKey}`);
 
   // Acquire lock
-  const locked = await acquireLock(`${domain}:${resource}`, runId, lockTtlMs);
-  if (!locked) {
+  const lockResult = await acquireLockSafely(`${domain}:${resource}`, runId, lockTtlMs, {
+    label: `${domain}:${resource}`,
+  });
+  if (lockResult.skipped) {
+    process.exit(0);
+  }
+  if (!lockResult.locked) {
     console.log('  SKIPPED: another seed run in progress');
     process.exit(0);
   }
@@ -305,7 +335,10 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
     const publishResult = await atomicPublish(canonicalKey, data, validateFn, ttlSeconds);
     if (publishResult.skipped) {
       const durationMs = Date.now() - startMs;
-      console.log(`  SKIPPED: validation failed (empty data) — preserving existing cache`);
+      const keys = [canonicalKey];
+      if (extraKeys) keys.push(...extraKeys.map(ek => ek.key));
+      await extendExistingTtl(keys, ttlSeconds || 600);
+      console.log(`  SKIPPED: validation failed (empty data) — extended existing cache TTL`);
       console.log(`\n=== Done (${Math.round(durationMs)}ms, no write) ===`);
       await releaseLock(`${domain}:${resource}`, runId);
       process.exit(0);
